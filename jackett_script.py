@@ -10,11 +10,11 @@ from xml.etree import ElementTree
 CATEGORY_STRING = re.compile("(^([0-9]+,)*[0-9]+$|(^$))")
 
 
-class JackettRequestConstruction:
+class JackettRequestConstructor:
 
     def __init__(self, ip, port, api_key):
         """
-        Initialize a JackettRequestConstruction object.
+        Initialize a JackettRequestConstructor object.
 
         :param ip: the IP where the Jackett service is located.
         :param port: the port where the Jackett service is located.
@@ -24,7 +24,7 @@ class JackettRequestConstruction:
         self.port = port
         self.api_key = api_key
 
-    def _jackett_url_constructor(self, query_type="caps", tracker="all", **kwargs):
+    def _url_constructor(self, query_type="caps", tracker="all", **kwargs):
         """
         Build a URL for sending requests to a running Jackett service.
 
@@ -38,15 +38,15 @@ class JackettRequestConstruction:
 
         return url + "".join(["&{}={}".format(k, v) for k, v in kwargs.items()])
 
-    def caps_jackett_request(self, tracker="all"):
+    def caps_request(self, tracker="all"):
         """
         Create a CAPS type Torznab request
 
         :return: a CAPS request
         """
-        return self._jackett_url_constructor(tracker=tracker)
+        return self._url_constructor(tracker=tracker)
 
-    def search_jackett_request(self, q="", limit=50, cat="", maxage=100, offset=0, tracker="all"):
+    def search_request(self, q="", limit=50, cat="", maxage=100, offset=0, tracker="all"):
         """
         Create a SEARCH type Torznab request.
 
@@ -58,10 +58,11 @@ class JackettRequestConstruction:
         :param tracker: the tracker for which the request is forwarded. Defaults to 'all'.
         :return: a SEARCH request
         """
-        assert CATEGORY_STRING.match(cat), "The cat parameter is incorrectly formatted"
+        if not CATEGORY_STRING.match(cat):
+            raise ValueError("The cat parameter is incorrectly formatted")
 
-        return self._jackett_url_constructor(query_type="search", tracker=tracker, q=q, limit=limit, cat=cat,
-                                             maxage=maxage, offset=offset)
+        return self._url_constructor(query_type="search", tracker=tracker, q=q, limit=limit, cat=cat,
+                                     maxage=maxage, offset=offset)
 
     def get_tracker_feed(self, tracker):
         """
@@ -71,30 +72,90 @@ class JackettRequestConstruction:
         :param tracker: the name of the tracker whose feed should be fetched
         :return: a SEARCH request, which fetches the tracker's feed
         """
-        return self._jackett_url_constructor(query_type="search", tracker=tracker)
+        return self._url_constructor(query_type="search", tracker=tracker)
+
+
+class TriblerRequestConstructor:
+
+    def __init__(self, ip, port):
+        self._base_url = "http://{}:{}/".format(ip, port)
+
+    def _url_constructor(self, endpoint):
+        """
+        Create a URL for sending requests to one of Tribler's endpoints
+
+        :param endpoint: either a string which represents the endpoint, or a list of strings which are concatenated
+                         together (separated by '/').
+        :return: a URL which points to a Tribler endpoint
+        """
+        if not endpoint:
+            raise ValueError("The endpoint parameter cannot be None")
+        elif not isinstance(endpoint, (str, list)):
+            raise ValueError("The endpoint parameter must either be a string or a list of strings")
+        elif isinstance(endpoint, list) and any([not isinstance(x, str) for x in endpoint]):
+            raise ValueError("The endpoint list must only contain strings")
+
+        return self._base_url + (endpoint if isinstance(endpoint, str) else '/'.join(endpoint))
+
+    def _url_constructor_with_args(self, endpoint, **kwargs):
+        """
+        Create a URL for sending requests to one of Tribler's endpoints, which contains parmeters embeded in its
+
+        :param endpoint: either a string which represents the endpoint, or a list of strings which are concatenated
+                         together (separated by '/').
+        :param kwargs: this is where all the extra parameters will be stored
+        :return: a URL which points to a Tribler endpoint
+        """
+        return self._url_constructor(endpoint) + "".join(["&{}={}".format(k, v) for k, v in kwargs.items()])
+
+    def add_torrent_request(self):
+        """
+        Generate a URL for the request of adding a new torrent. Since this is a PUT HTTP request, the parameters are
+        not encoded in the URL, and will have to be added in the request body separately.
+
+        :return: a URL for requesting the addition of a new torrent.
+        """
+        return self._url_constructor(['mychannel', 'torrents'])
+
+    def commit_torrents_request(self):
+        """
+        Generate a URL to request that new torrents be committed. This is a POST HTTP request.
+
+        :return: a URL for committing new torrents.
+        """
+        return self._url_constructor(['mychannel', 'commit'])
 
 
 class JackettFeedParser:
-
     # This dictionary is required by Element.find() (from ElementTree.Element) in order to correctly identify tags
     RSS_TORZNAB_NAMESPACES = {
         'torznab': 'http://torznab.com/schemas/2015/feed'
     }
 
-    def __init__(self, ip, port, api_key, tracker, request_interval=60):
+    def __init__(self, jackett_ip, jackett_port, api_key, tracker, tribler_ip, tribler_port, request_interval=60,
+                 commit_interval=60 * 60):
         """
         Initialize a JackettFeedParser object.
 
-        :param ip: the interface on which the Jackett service is running.
-        :param port: the port on which the Jackett service is running.
+        :param jackett_ip: the interface on which the Jackett service is running.
+        :param jackett_port: the port on which the Jackett service is running.
         :param api_key: the API Key of the Jackett service.
         :param tracker: the name of the tracker whose feed this parser monitors.
+        :param tribler_ip: the interface on which the Tribler service is running.
+        :param tribler_port: the port on which the Tribler service is running.
         :param request_interval: the interval (in seconds) between requests to the jackett service
+        :param commit_interval: the interval (in seconds) between requests to Tribler for committing the torrents
         """
-        self._jackett_req_constructor = JackettRequestConstruction(ip, port, api_key)
+        self._jackett_req_constructor = JackettRequestConstructor(jackett_ip, jackett_port, api_key)
+        self._tribler_req_constructor = TriblerRequestConstructor(tribler_ip, tribler_port)
+
         self._tracker = tracker
         self._request_interval = request_interval
-        self._task = None
+        self._commit_interval = commit_interval
+        self._request_task = None
+        self._commit_task = None
+
+        self._session = None
 
         self._logger = logging.getLogger(self.__class__.__name__)
         # TODO: The initializer should accept either an object to the Endpoint, where the addition of the torrent is
@@ -104,14 +165,8 @@ class JackettFeedParser:
         #       specialized methods which are focused on adding the torrent from a magnet link or a link to a .torrent
         #       download.
         # TODO:  check to see how this code handles non-valid XMLs. Potentially even badly formed ones.
-
-    def set_request_interval(self, interval):
-        """
-        Set the request_interval field.
-
-        :param interval: the new request interval
-        """
-        self._request_interval = interval
+        # FIXME: Check to see if the guid field should be used instead of the magnetlink field. Should I use some form
+        #        encoding? Why do torrents get added sometimes?
 
     def _get_torznab_attribute(self, item, name):
         """
@@ -124,8 +179,8 @@ class JackettFeedParser:
         :return: the value attribute as a string, if the searched attribute exists, or None.
         """
         # A bit of defensive programming: check to see that the
-        if item.tag != 'item':
-            return None
+        if not isinstance(item, ElementTree.Element) or item.tag != 'item':
+            raise ValueError("The item parameter is either not of Element type or does not point to an <item> tag")
 
         for tag in item.findall('torznab:attr', self.RSS_TORZNAB_NAMESPACES):
             if tag.get('name') == name and tag.get('value'):
@@ -144,8 +199,7 @@ class JackettFeedParser:
         try:
             rss_xml = ElementTree.fromstring(input)
         except ElementTree.ParseError as exc:
-            self._logger.error("The RSS XML is not well formed: {}".format(exc))
-            return
+            raise ValueError("The RSS XML is not well formed: {}".format(exc))
 
         # This is where the torrent links will be stored
         torrent_dict = {}
@@ -167,16 +221,59 @@ class JackettFeedParser:
 
         return torrent_dict
 
-    async def _get(self, session, url):
+    async def _get(self, url):
         """
-        Forward an HTTP request, and await its response.
+        Forward an HTTP GET request, and await its response.
 
-        :param session: an aiohttp.ClientSession object
-        :param url: the url where the HTTP request is to be forwarded
+        :param url: the url where the HTTP GET request is to be forwarded
         :return: the response in string format
         """
-        async with session.get(url) as response:
+        async with self._session.get(url) as response:
             return await response.text()
+
+    async def _put(self, url, data=None):
+        """
+        Forward an HTTP PUT request, and await its response.
+
+        :param url: the url where the HTTP PUT request is to be forwarded
+        :param data: a dictionary, bytes, or a file-like object which is to be sent in the body of the request. This
+                     parameter may also be None
+        :return: the response in string format
+        """
+        async with self._session.put(url, data=data) as response:
+            return await response.text()
+
+    async def _post(self, url, data=None):
+        """
+        Forward an HTTP POST request, and await its response.
+
+        :param url: the url where the HTTP POST request is to be forwarded
+        :param data: a dictionary, bytes, or a file-like object which is to be sent in the body of the request. This
+                     parameter may also be None
+        :return: the response in string format
+        """
+        async with self._session.post(url, data=data) as response:
+            return await response.text()
+
+    async def _add_torrents(self, torrents, chunk_size=100):
+        """
+        Forward requests for adding each of the retrieved torrent from the Jackett service to Tribler.
+
+        :param torrents: a dictionary of torrents, each entry points from the torrent's infohash to its magnet link
+        :param chunk_size: the number of torrents that should be added at once
+        """
+        keys = list(torrents.keys())
+
+        for idx in range(0, len(keys), chunk_size):
+            coros = [self._put(self._tribler_req_constructor.add_torrent_request(),
+                               {'uri': torrents[key]}) for key in keys[idx:idx + chunk_size]]
+
+            results = await asyncio.gather(*coros)
+
+            # results = await self._put(self._tribler_req_constructor.add_torrent_request(), {'uri': torrents[keys[idx]]})
+            print(results)
+
+        return 123
 
     async def _loop_requests(self):
         """
@@ -185,56 +282,75 @@ class JackettFeedParser:
         """
         # Loop until the task is closed
         while True:
-            # FIXME: There should only be one session per application; see here: https://docs.aiohttp.org/en/stable/client_quickstart.html#make-a-request
-            async with aiohttp.ClientSession() as session:
-                    # Forward a request for the RSS feed
-                    response = await self._get(session,
-                                               self._jackett_req_constructor.get_tracker_feed(tracker=self._tracker))
+            # Forward a request for the RSS feed
+            raw_response = await self._get(self._jackett_req_constructor.get_tracker_feed(tracker=self._tracker))
 
-                    # Parse the response, and get the infohash -> magnetlink dict
-                    res = self._parse_links(response)
-                    print(res)
+            # Parse the response, and get the infohash -> magnetlink dict
+            torrent_links = self._parse_links(raw_response)
+            print("Example:", torrent_links[list(torrent_links.keys())[0]])
 
-                    # Forward a request for each of the magnetlinks asynchronously
+            # Forward a request for each of the magnetlinks asynchronously
+            addition_results = await self._add_torrents(torrent_links)
 
+            # Wait some time until forwarding a new request
             await asyncio.sleep(self._request_interval)
+
+    async def _loop_commit(self):
+        """
+        Forward torrent commit requests to Tribler. This is done forever until the task is stopped bia the stop()
+        method. The time difference between each request is _commit_interval.
+        """
+        while True:
+            await self._post(self._tribler_req_constructor.commit_torrents_request())
+
+            await asyncio.sleep(self._commit_interval)
 
     def start(self):
         """
         Start the JackettFeedParser object. After this method is called, a request will be periodically forwarded to
         the Jackett service in order to request the feed for the Parser's tracker.
         """
-        if self._task:
+        if self._request_task:
             return
+
+        self._session = aiohttp.ClientSession()
 
         loop = asyncio.get_event_loop()
 
-        self._task = loop.create_task(self._loop_requests())
+        self._request_task = loop.create_task(self._loop_requests())
+        self._commit_task = loop.create_task(self._loop_commit())
 
-    def stop(self):
+    async def stop(self):
         """
-        Stops the requests to the Jackett service.
+        Stop the requests to the Jackett and Tribler services.
         """
-        self._task.cancel()
-        self._task = None
+        await self._session.close()
+
+        self._request_task.cancel()
+        self._request_task = None
+
+        self._commit_task.cancel()
+        self._commit_task = None
 
 
 async def _main():
     # Create a request constructor object
     jackett_req_constructor = JackettFeedParser("localhost", 9117, "b1khzic1q4ixkzukcqnscvnom6pkrfz6", "rarbg",
-                                                request_interval=5)
+                                                "localhost", 8085, request_interval=300)
 
     jackett_req_constructor.start()
 
     await asyncio.sleep(40)
 
-    jackett_req_constructor.stop()
+    await jackett_req_constructor.stop()
 
     await asyncio.sleep(40)
 
     jackett_req_constructor.start()
 
     await asyncio.sleep(40)
+
+    await jackett_req_constructor.stop()
 
 
 def main():
