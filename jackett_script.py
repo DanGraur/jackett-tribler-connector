@@ -1,12 +1,13 @@
-import asyncio
 import aiohttp
+import asyncio
 import logging
 import re
+import sys
 
+from threading import Thread
 from xml.etree import ElementTree
 
 # Matches a comma separated list of numbers, or the empty string
-
 CATEGORY_STRING = re.compile("(^([0-9]+,)*[0-9]+$|(^$))")
 
 
@@ -132,8 +133,8 @@ class JackettFeedParser:
         'torznab': 'http://torznab.com/schemas/2015/feed'
     }
 
-    def __init__(self, jackett_ip, jackett_port, api_key, tracker, tribler_ip, tribler_port, request_interval=60,
-                 commit_interval=60 * 60):
+    def __init__(self, jackett_ip, jackett_port, api_key, tracker, tribler_ip, tribler_port, request_interval=600,
+                 commit_interval=3600):
         """
         Initialize a JackettFeedParser object.
 
@@ -158,15 +159,6 @@ class JackettFeedParser:
         self._session = None
 
         self._logger = logging.getLogger(self.__class__.__name__)
-        # TODO: The initializer should accept either an object to the Endpoint, where the addition of the torrent is
-        #       done there should be a url where the request should be sent to add the new torrents
-        # TODO: add the code which parses the XML, looks for the link, and then forwards the link to a method which
-        #       adds it to the torrent list. Look into the existing code for this, and check to see if there are
-        #       specialized methods which are focused on adding the torrent from a magnet link or a link to a .torrent
-        #       download.
-        # TODO:  check to see how this code handles non-valid XMLs. Potentially even badly formed ones.
-        # FIXME: Check to see if the guid field should be used instead of the magnetlink field. Should I use some form
-        #        encoding? Why do torrents get added sometimes?
 
     def _get_torznab_attribute(self, item, name):
         """
@@ -195,11 +187,7 @@ class JackettFeedParser:
         :param input: the input string should contain a valid RSS XML.
         :return: a dictionary, which points from the torrent name to the torrent (magnet-)link
         """
-        # FIXME: Should I return silently if the XML is not well formed, or should I propagate the error up?
-        try:
-            rss_xml = ElementTree.fromstring(input)
-        except ElementTree.ParseError as exc:
-            raise ValueError("The RSS XML is not well formed: {}".format(exc))
+        rss_xml = ElementTree.fromstring(input)
 
         # This is where the torrent links will be stored
         torrent_dict = {}
@@ -263,17 +251,17 @@ class JackettFeedParser:
         :param chunk_size: the number of torrents that should be added at once
         """
         keys = list(torrents.keys())
+        results = []
 
         for idx in range(0, len(keys), chunk_size):
             coros = [self._put(self._tribler_req_constructor.add_torrent_request(),
                                {'uri': torrents[key]}) for key in keys[idx:idx + chunk_size]]
 
-            results = await asyncio.gather(*coros)
+            temp_results = await asyncio.gather(*coros)
 
-            # results = await self._put(self._tribler_req_constructor.add_torrent_request(), {'uri': torrents[keys[idx]]})
-            print(results)
+            results += temp_results
 
-        return 123
+        return results
 
     async def _loop_requests(self):
         """
@@ -282,15 +270,19 @@ class JackettFeedParser:
         """
         # Loop until the task is closed
         while True:
-            # Forward a request for the RSS feed
+            # Forward a request for the Torznab RSS feed
             raw_response = await self._get(self._jackett_req_constructor.get_tracker_feed(tracker=self._tracker))
 
-            # Parse the response, and get the infohash -> magnetlink dict
-            torrent_links = self._parse_links(raw_response)
-            print("Example:", torrent_links[list(torrent_links.keys())[0]])
-
-            # Forward a request for each of the magnetlinks asynchronously
-            addition_results = await self._add_torrents(torrent_links)
+            try:
+                # Get the torrent magnet links
+                torrent_links = self._parse_links(raw_response)
+                print(torrent_links[list(torrent_links.keys())[0]])
+            except ElementTree.ParseError as exc:
+                print(exc, file=sys.stderr)
+            else:
+                # Forward torrent addition requests to Tribler
+                addition_results = await self._add_torrents(torrent_links)
+                print(addition_results)
 
             # Wait some time until forwarding a new request
             await asyncio.sleep(self._request_interval)
@@ -324,39 +316,75 @@ class JackettFeedParser:
         """
         Stop the requests to the Jackett and Tribler services.
         """
-        await self._session.close()
-
+        # Close the ongoing asyncio tasks
         self._request_task.cancel()
         self._request_task = None
 
         self._commit_task.cancel()
         self._commit_task = None
 
+        # Close the aiohttp session
+        await self._session.close()
 
-async def _main():
-    # Create a request constructor object
-    jackett_req_constructor = JackettFeedParser("localhost", 9117, "b1khzic1q4ixkzukcqnscvnom6pkrfz6", "rarbg",
-                                                "localhost", 8085, request_interval=300)
 
-    jackett_req_constructor.start()
+async def _close_loop(parser):
+    """
+    Await for the return key to be pressed, then shut down the parser gracefully.
 
-    await asyncio.sleep(40)
+    :param parser: the parser object which reads input from Jackett and feeds it to Tribler
+    """
+    input("Press <return> to stop")
+    await parser.stop()
 
-    await jackett_req_constructor.stop()
 
-    await asyncio.sleep(40)
+def close_loop(loop, parser):
+    """
+    This method should run in another thread. This method takes care of coordinating the termination of the torrent
+    addition process, and of terminating the loops
 
-    jackett_req_constructor.start()
+    :param loop: the main thread's event loop
+    :param parser: the parser object which reads input from Jackett and feeds it to Tribler
+    """
+    new_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(new_loop)
 
-    await asyncio.sleep(40)
+    new_loop.run_until_complete(_close_loop(parser))
 
-    await jackett_req_constructor.stop()
+    new_loop.stop()
+    loop.call_soon_threadsafe(loop.stop)
 
 
 def main():
+    """
+    Starts the torrent retrieval and dissemination process. Also spawns a thread which is tasked with terminating the
+    script gracefully when the return key is pressed.
+    """
+
+    # Configure these to your needs
+    jackett_ip = "localhost"
+    jackett_port = 9117
+
+    api_key = "<API_Key>"
+    tracker = "<tracker>"
+
+    tribler_ip = "localhost"
+    tribler_port = 8085
+
+    # Launch the script
+    jackett_parser = JackettFeedParser(jackett_ip, jackett_port, api_key, tracker, tribler_ip, tribler_port)
+
+    jackett_parser.start()
+
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(_main())
-    loop.close()
+
+    termination_thread = Thread(target=close_loop, args=(loop, jackett_parser))
+    termination_thread.start()
+
+    loop.run_forever()
+
+    termination_thread.join()
+
+    print("The script has been terminated.")
 
 
 if __name__ == '__main__':
