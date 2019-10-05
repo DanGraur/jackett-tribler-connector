@@ -133,7 +133,7 @@ class JackettFeedParser:
         'torznab': 'http://torznab.com/schemas/2015/feed'
     }
 
-    def __init__(self, jackett_ip, jackett_port, api_key, tracker, tribler_ip, tribler_port, request_interval=600,
+    def __init__(self, jackett_ip, jackett_port, api_key, trackers, tribler_ip, tribler_port, request_interval=600,
                  commit_interval=3600):
         """
         Initialize a JackettFeedParser object.
@@ -141,7 +141,7 @@ class JackettFeedParser:
         :param jackett_ip: the interface on which the Jackett service is running.
         :param jackett_port: the port on which the Jackett service is running.
         :param api_key: the API Key of the Jackett service.
-        :param tracker: the name of the tracker whose feed this parser monitors.
+        :param trackers: a list of tracker ids whose feed is parsed by this script.
         :param tribler_ip: the interface on which the Tribler service is running.
         :param tribler_port: the port on which the Tribler service is running.
         :param request_interval: the interval (in seconds) between requests to the jackett service
@@ -150,7 +150,7 @@ class JackettFeedParser:
         self._jackett_req_constructor = JackettRequestConstructor(jackett_ip, jackett_port, api_key)
         self._tribler_req_constructor = TriblerRequestConstructor(tribler_ip, tribler_port)
 
-        self._tracker = tracker
+        self._trackers = trackers
         self._request_interval = request_interval
         self._commit_interval = commit_interval
         self._request_task = None
@@ -270,21 +270,24 @@ class JackettFeedParser:
         """
         # Loop until the task is closed
         while True:
-            # Forward a request for the Torznab RSS feed
-            raw_response = await self._get(self._jackett_req_constructor.get_tracker_feed(tracker=self._tracker))
+            # Forward a set of requests to Jackett in order to retrieve the tracker feeds
+            jackett_coros = [self._get(self._jackett_req_constructor.get_tracker_feed(tracker=tracker))
+                             for tracker in self._trackers]
+            raw_responses = await asyncio.gather(*jackett_coros)
 
-            try:
-                # Get the torrent magnet links
-                torrent_links = self._parse_links(raw_response)
-                print(torrent_links[list(torrent_links.keys())[0]])
-            except ElementTree.ParseError as exc:
-                print(exc, file=sys.stderr)
-            else:
-                # Forward torrent addition requests to Tribler
-                addition_results = await self._add_torrents(torrent_links)
-                print(addition_results)
+            for raw_response in raw_responses:
+                try:
+                    # Get the torrent magnet links
+                    torrent_links = self._parse_links(raw_response)
+                    # print(torrent_links[list(torrent_links.keys())[0]])
+                except ElementTree.ParseError as exc:
+                    print(exc, file=sys.stderr)
+                else:
+                    # Forward torrent addition requests to Tribler
+                    addition_results = await self._add_torrents(torrent_links)
+                    print(addition_results)
 
-            # Wait some time until forwarding a new request
+            # Wait some time until forwarding a new set of requests
             await asyncio.sleep(self._request_interval)
 
     async def _loop_commit(self):
@@ -333,7 +336,7 @@ async def _close_loop(parser):
 
     :param parser: the parser object which reads input from Jackett and feeds it to Tribler
     """
-    input("Press <return> to stop")
+    input("Press <return> to stop\n")
     await parser.stop()
 
 
@@ -364,14 +367,14 @@ def main():
     jackett_ip = "localhost"
     jackett_port = 9117
 
-    api_key = "<API_Key>"
-    tracker = "<tracker>"
+    api_key = "<your_api_key>"
+    trackers = "[<list_of_trackers>]"
 
     tribler_ip = "localhost"
     tribler_port = 8085
 
     # Launch the script
-    jackett_parser = JackettFeedParser(jackett_ip, jackett_port, api_key, tracker, tribler_ip, tribler_port)
+    jackett_parser = JackettFeedParser(jackett_ip, jackett_port, api_key, trackers, tribler_ip, tribler_port)
 
     jackett_parser.start()
 
