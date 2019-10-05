@@ -185,7 +185,7 @@ class JackettFeedParser:
         Retrieve the torrent links from the XML input, and return them in a dictionary.
 
         :param input: the input string should contain a valid RSS XML.
-        :return: a dictionary, which points from the torrent name to the torrent (magnet-)link
+        :return: a dictionary, which points from the torrent infohash or name to the torrent (magnet-)link
         """
         rss_xml = ElementTree.fromstring(input)
 
@@ -193,16 +193,16 @@ class JackettFeedParser:
         torrent_dict = {}
 
         for item in rss_xml.iter('item'):
-            # try to get the infohash first
+            # try to get the infohash first if that fails, get the title
             key = self._get_torznab_attribute(item, "infohash")
 
-            if not key and item.find('title'):
+            if (not key) and item.find('title') is not None:
                 key = item.find('title').text
 
             if key:
                 val = self._get_torznab_attribute(item, "magneturl")
 
-                if not val and item.find('link'):
+                if not val and item.find('link') is not None:
                     val = item.find('link').text
 
                 torrent_dict[key] = val
