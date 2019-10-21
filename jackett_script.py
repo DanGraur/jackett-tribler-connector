@@ -1,4 +1,5 @@
 import aiohttp
+from argparse import ArgumentParser
 import asyncio
 import logging
 import re
@@ -357,24 +358,15 @@ def close_loop(loop, parser):
     loop.call_soon_threadsafe(loop.stop)
 
 
-def main():
+def _main(args):
     """
     Starts the torrent retrieval and dissemination process. Also spawns a thread which is tasked with terminating the
     script gracefully when the return key is pressed.
     """
-
-    # Configure these to your needs
-    jackett_ip = "localhost"
-    jackett_port = 9117
-
-    api_key = "<your_api_key>"
-    trackers = "[<list_of_trackers>]"
-
-    tribler_ip = "localhost"
-    tribler_port = 8085
-
     # Launch the script
-    jackett_parser = JackettFeedParser(jackett_ip, jackett_port, api_key, trackers, tribler_ip, tribler_port)
+    jackett_parser = JackettFeedParser(args.jackett_ip, args.jackett_port, args.api_key, args.trackers, args.tribler_ip,
+                                       args.tribler_port, request_interval=args.query_interval,
+                                       commit_interval=args.commit_interval)
 
     jackett_parser.start()
 
@@ -388,6 +380,60 @@ def main():
     termination_thread.join()
 
     print("The script has been terminated.")
+
+
+def main():
+    parser = ArgumentParser(description="Import torrents from various trackers to Tribler using Jackett.")
+
+    parser.add_argument("api_key",
+                        type=str,
+                        help="The API Key of the Jackett service."
+                        )
+
+    parser.add_argument("trackers",
+                        type=str,
+                        help="A (space separated) list of trackers, which this script will track. These need to be"
+                             "added in the Jackett service prior to starting the script.",
+                        nargs="+"
+                        )
+
+    parser.add_argument("--jackett_ip",
+                        type=str,
+                        help="The interface on which the Jackett service can be reached.",
+                        default="localhost"
+                        )
+
+    parser.add_argument("--jackett_port",
+                        type=int,
+                        help="The port on which the Jackett service can be reached.",
+                        default=9117
+                        )
+
+    parser.add_argument("--tribler_ip",
+                        type=str,
+                        help="The interface on which Tribler can be reached.",
+                        default="localhost"
+                        )
+
+    parser.add_argument("--tribler_port",
+                        type=int,
+                        help="The port on which Tribler can be reached.",
+                        default=8085
+                        )
+
+    parser.add_argument("--query_interval",
+                        type=int,
+                        help="The time between queries to the Jackett service.",
+                        default=600
+                        )
+
+    parser.add_argument("--commit_interval",
+                        type=int,
+                        help="The time bewteen commit requests towards Tribler.",
+                        default=3600
+                        )
+
+    _main(parser.parse_args())
 
 
 if __name__ == '__main__':
