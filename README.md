@@ -6,9 +6,9 @@ This script is tasked with periodically fetching torrent information from variou
 
 ## How it works
 
-The script will periodically forward HTTP requests to a running Jackett service, querying it for tracker feeds. The Jackett service may be either local or remote. Jackett will return the feed in a RSS XML like format called Torznab. This script will then parse this XML in order to extract the magnet links embedded in the XML for each torrent. For each of the aforementioned magnet links, the script will forward an HTTP request to Tribler's REST API towards the `mychannel/torrents` endpoint, which demands that the torrent be added. 
+The script will periodically forward HTTP requests to a running Jackett service, querying it for tracker feeds. The Jackett service may be either local or remote. Jackett will return the feed in a RSS XML like format called Torznab. This script will then parse this XML in order to extract the magnet links embedded in the XML for each torrent. For each of the aforementioned magnet links, the script will forward an HTTP `PUT` request to Tribler's REST API towards the `mychannel/torrents` endpoint, which demands that the torrent be added. 
 
-Asynchronous to this, the script will also periodically forward a commit request to Tribler's REST API towards the `mychannel/commit` endpoint, in order to demand that the Channel changes be committed.
+Asynchronous to this, the script will also periodically forward a commit request to Tribler's REST API towards the `mychannel/commit` endpoint, in order to demand that the Channel changes be committed. This is an HTTP `POST` request.
 
 ## Utilization Instructions
 
